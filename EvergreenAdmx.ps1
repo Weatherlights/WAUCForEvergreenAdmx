@@ -657,6 +657,40 @@ function Get-MDOPAdmxOnline
     }
 }
 
+
+function Get-WAUCAdmxOnline
+{
+    <#
+    .SYNOPSIS
+    Returns latest Version and Uri for the Desktop Optimization Pack Admx files (both x64 and x86)
+#>
+
+    $urldownload = "https://raw.githubusercontent.com/Weatherlights/Winget-AutoUpdate-Intune/main/ADMX/WinGet-AutoUpdate-Configurator.admx"
+    try
+    {
+        $web = Invoke-WebRequest -UseBasicParsing -Uri $urldownload -ContentType "application/xml" ;
+        $web.Content | Out-file .\Downloads\testadmx.xml
+        [xml]$xml = (Get-Content .\Downloads\testadmx.xml -Raw) 
+        # load page for version scrape
+        $web = Invoke-WebRequest -UseDefaultCredentials -UseBasicParsing -Uri $urlversion
+        $str = ($web.ToString() -split "[`r`n]" | Select-String "Version:").ToString()
+        # grab version
+        $Version = ($str | Select-String -Pattern "(\d+(\.\d+){1,4})" -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { $_.Value }).ToString()
+        # load page for uri scrape
+        $web = Invoke-WebRequest -UseDefaultCredentials -UseBasicParsing -Uri $urldownload -MaximumRedirection 0
+        # grab download url
+        $href = $web.Links | Where-Object { $_.outerHTML -like "*click here to download manually*" }
+
+        # return evergreen object
+        return @{ Version = $Version; URI = $href.href }
+    }
+    catch
+    {
+        Throw $_
+    }
+}
+
+
 function Get-ZoomDesktopClientAdmxOnline
 {
     <#
@@ -1582,6 +1616,84 @@ function Get-BIS-FAdmx
 
             # cleanup
             Remove-Item -Path "$($env:TEMP)\bisfadmx" -Recurse -Force
+
+            return $evergreen
+        }
+        catch
+        {
+            Throw $_
+        }
+    }
+    else
+    {
+        # version already processed
+        return $null
+    }
+}
+
+
+function Get-WAUCAdmx
+{
+    <#
+    .SYNOPSIS
+    Process Winget-Autoupdate-Configurator (WAUC) Admx files
+
+    .PARAMETER Version
+    Current Version present
+
+    .PARAMETER PolicyStore
+    Destination for the Admx files
+#>
+
+    param(
+        [string]$Version,
+        [string]$PolicyStore = $null,
+        [string[]]$Languages = $null
+    )
+
+    $evergreen = Get-MDOPAdmxOnline
+    $productname = "Microsoft Desktop Optimization Pack"
+    $productfolder = ""; if ($UseProductFolders) { $productfolder = "\$($productname)" }
+
+    # see if this is a newer version
+    if (-not $Version -or [version]$evergreen.Version -gt [version]$Version)
+    {
+        Write-Verbose "Found new version $($evergreen.Version) for '$($productname)'"
+
+        # download and process
+        $outfile = "$($WorkingDirectory)\downloads\$($evergreen.URI.Split("/")[-1])"
+        try
+        {
+            # download
+            Write-Verbose "Downloading '$($evergreen.URI)' to '$($outfile)'"
+            Invoke-WebRequest -UseDefaultCredentials -Uri $evergreen.URI -UseBasicParsing -OutFile $outfile
+
+            # extract
+            Write-Verbose "Extracting '$($outfile)' to '$($env:TEMP)\mdopadmx'"
+            $null = (New-Item -Path "$($env:TEMP)\mdopadmx" -ItemType Directory -Force)
+            $null = (expand "$($outfile)" -F:* "$($env:TEMP)\mdopadmx")
+
+            # find app-v folder
+            Write-Verbose "Finding App-V folder"
+            $appvfolder = (Get-ChildItem -Path "$($env:TEMP)\mdopadmx" -Filter "App-V*" | Sort-Object Name -Descending)[0].Name
+
+            Write-Verbose "Finding MBAM folder"
+            $mbamfolder = (Get-ChildItem -Path "$($env:TEMP)\mdopadmx" -Filter "MBAM*" | Sort-Object Name -Descending)[0].Name
+
+            Write-Verbose "Finding UE-V folder"
+            $uevfolder = (Get-ChildItem -Path "$($env:TEMP)\mdopadmx" -Filter "UE-V*" | Sort-Object Name -Descending)[0].Name
+
+            # copy
+            $sourceadmx = "$($env:TEMP)\mdopadmx\$($appvfolder)"
+            $targetadmx = "$($WorkingDirectory)\admx$($productfolder)"
+            Copy-Admx -SourceFolder $sourceadmx -TargetFolder $targetadmx -PolicyStore $PolicyStore -ProductName "$($productname) - App-V" -Languages $Languages
+            $sourceadmx = "$($env:TEMP)\mdopadmx\$($mbamfolder)"
+            Copy-Admx -SourceFolder $sourceadmx -TargetFolder $targetadmx -PolicyStore $PolicyStore -ProductName "$($productname) - MBAM" -Languages $Languages
+            $sourceadmx = "$($env:TEMP)\mdopadmx\$($uevfolder)"
+            Copy-Admx -SourceFolder $sourceadmx -TargetFolder $targetadmx -PolicyStore $PolicyStore -ProductName "$($productname) - UE-V" -Languages $Languages
+
+            # cleanup
+            Remove-Item -Path "$($env:TEMP)\mdopadmx" -Recurse -Force
 
             return $evergreen
         }
